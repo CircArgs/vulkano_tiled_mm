@@ -85,7 +85,7 @@ fn main() {
                 src: "
                     #version 450
 
-                    layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+                    layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
                     layout(set = 0, binding = 0) buffer Data0 {
                         uint data[];
@@ -107,17 +107,31 @@ fn main() {
                         uint tile_height;
                       } pc;
 
-                    shared uint ds_A[];
-                    shared uint ds_B[];
+                    shared uint ds_A[16][16];
+                    shared uint ds_B[16][16];
                     
                     void main() {
-                        uint i = gl_GlobalInvocationID.y;
-                        uint k = gl_GlobalInvocationID.x;
-                        uint temp = 0;
-                        for(int j =0; j<pc.shared_dim; j++){
-                            temp+=data0.data[i * pc.shared_dim + j] * data1.data[j * pc.ret_cols + k];
+                        uint bx = gl_WorkGroupID.x; 
+                        uint by = gl_WorkGroupID.y;
+                        uint tx = gl_LocalInvocationID.x; 
+                        uint ty = gl_LocalInvocationID.y;
+
+                        uint Row = by * gl_WorkGroupSize.y + ty;
+                        uint Col = bx * gl_WorkGroupSize.x + tx;
+                        uint Cvalue = 0;
+                        for (uint t = 0; t < pc.shared_dim/pc.tile_width; ++t) {
+
+                            ds_A[ty][tx] = data0.data[Row*pc.shared_dim + t*pc.tile_width+tx];
+                            ds_B[ty][tx] = data1.data[(t*pc.tile_width+ty)*pc.ret_cols + Col];
+                            barrier();
+                            for (uint i = 0; i < pc.tile_width; ++i){
+                                Cvalue += ds_A[ty][i] * ds_B[i][tx];
+                                barrier();
+                            }
+                          
                         }
-                        ret.data[i * pc.ret_cols + k] = temp;
+    
+                        ret.data[Row*pc.ret_cols+Col] = Cvalue;
                     }
                 "
             }
@@ -197,7 +211,7 @@ fn main() {
         // `Arc`, this only clones the `Arc` and not the whole pipeline or set (which aren't
         // cloneable anyway). In this example we would avoid cloning them since this is the last
         // time we use them, but in a real code you would probably need to clone them.
-        .dispatch([8, 8, 1], pipeline.clone(), set.clone(), push_constants)
+        .dispatch([4, 4, 1], pipeline.clone(), set.clone(), push_constants)
         .unwrap();
     // Finish building the command buffer by calling `build`.
     let command_buffer = builder.build().unwrap();
@@ -232,7 +246,7 @@ fn main() {
     // check it out.
     // The call to `read()` would return an error if the buffer was still in use by the GPU.
     let data_buffer_content = ret_buffer.read().unwrap();
-    println!("{:?}", &data_buffer_content[..]);
+    println!("{:?}", &data_buffer_content[556..597]);
     // for n in 0..65536u32 {
     //     assert_eq!(data_buffer_content[n as usize], n * 12);
     // }
