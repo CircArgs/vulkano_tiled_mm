@@ -78,7 +78,7 @@ fn main() {
     //
     // If you are familiar with graphics pipeline, the principle is the same except that compute
     // pipelines are much simpler to create.
-    let pipeline = Arc::new({
+    let (pipeline, push_constants) = {
         mod cs {
             vulkano_shaders::shader! {
                 ty: "compute",
@@ -98,24 +98,48 @@ fn main() {
                     layout(set = 0, binding = 2) buffer Ret {
                         uint data[];
                     } ret;
-                    uint shared_dim = 64;
-                    uint ret_cols = 64;
-                    uint ret_rows = 64;
+
+                    layout(push_constant) uniform PushConstantData {
+                        uint shared_dim;
+                        uint ret_cols;
+                        uint ret_rows;
+                        uint tile_width;
+                        uint tile_height;
+                      } pc;
+
+                    shared uint ds_A[];
+                    shared uint ds_B[];
+                    
                     void main() {
                         uint i = gl_GlobalInvocationID.y;
                         uint k = gl_GlobalInvocationID.x;
                         uint temp = 0;
-                        for(int j =0; j<shared_dim; j++){
-                            temp+=data0.data[i * shared_dim + j] * data1.data[j * ret_cols + k];
+                        for(int j =0; j<pc.shared_dim; j++){
+                            temp+=data0.data[i * pc.shared_dim + j] * data1.data[j * pc.ret_cols + k];
                         }
-                        ret.data[i * ret_cols + k] = temp;
+                        ret.data[i * pc.ret_cols + k] = temp;
                     }
                 "
             }
         }
         let shader = cs::Shader::load(device.clone()).unwrap();
-        ComputePipeline::new(device.clone(), &shader.main_entry_point(), &(), None).unwrap()
-    });
+        // The `vulkano_shaders::shaders!` macro generates a struct with the correct representation of the push constants struct specified in the shader.
+        // Here we create an instance of the generated struct.
+        let push_constants = cs::ty::PushConstantData {
+            shared_dim: 64,
+            ret_cols: 64,
+            ret_rows: 64,
+            tile_width: 16,
+            tile_height: 16,
+        };
+        (
+            Arc::new(
+                ComputePipeline::new(device.clone(), &shader.main_entry_point(), &(), None)
+                    .unwrap(),
+            ),
+            push_constants,
+        )
+    };
 
     // We start by creating the buffer that will store the data.
     let data_buffer0 = {
@@ -173,7 +197,7 @@ fn main() {
         // `Arc`, this only clones the `Arc` and not the whole pipeline or set (which aren't
         // cloneable anyway). In this example we would avoid cloning them since this is the last
         // time we use them, but in a real code you would probably need to clone them.
-        .dispatch([8, 8, 1], pipeline.clone(), set.clone(), ())
+        .dispatch([8, 8, 1], pipeline.clone(), set.clone(), push_constants)
         .unwrap();
     // Finish building the command buffer by calling `build`.
     let command_buffer = builder.build().unwrap();

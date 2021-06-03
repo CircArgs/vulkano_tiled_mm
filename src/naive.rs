@@ -85,7 +85,7 @@ fn main() {
                 src: "
                     #version 450
 
-                    layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+                    layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
                     layout(set = 0, binding = 0) buffer Data0 {
                         uint data[];
@@ -98,10 +98,17 @@ fn main() {
                     layout(set = 0, binding = 2) buffer Ret {
                         uint data[];
                     } ret;
-
+                    uint shared_dim = 64;
+                    uint ret_cols = 64;
+                    uint ret_rows = 64;
                     void main() {
-                        uint idx = gl_GlobalInvocationID.x;
-                        ret.data[idx] = data0.data[idx] * data1.data[idx];
+                        uint i = gl_GlobalInvocationID.y;
+                        uint k = gl_GlobalInvocationID.x;
+                        uint temp = 0;
+                        for(int j =0; j<shared_dim; j++){
+                            temp+=data0.data[i * shared_dim + j] * data1.data[j * ret_cols + k];
+                        }
+                        ret.data[i * ret_cols + k] = temp;
                     }
                 "
             }
@@ -128,7 +135,7 @@ fn main() {
     };
     let ret_buffer = {
         // Iterator that produces the data.
-        let data_iter = (0..4096u32).map(|n| n);
+        let data_iter = (0..4096u32).map(|_| 0 as u32);
         // Builds the buffer and fills it with this iterator.
         CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), false, data_iter)
             .unwrap()
@@ -166,7 +173,7 @@ fn main() {
         // `Arc`, this only clones the `Arc` and not the whole pipeline or set (which aren't
         // cloneable anyway). In this example we would avoid cloning them since this is the last
         // time we use them, but in a real code you would probably need to clone them.
-        .dispatch([64, 1, 1], pipeline.clone(), set.clone(), ())
+        .dispatch([8, 8, 1], pipeline.clone(), set.clone(), ())
         .unwrap();
     // Finish building the command buffer by calling `build`.
     let command_buffer = builder.build().unwrap();
@@ -201,8 +208,8 @@ fn main() {
     // check it out.
     // The call to `read()` would return an error if the buffer was still in use by the GPU.
     let data_buffer_content = ret_buffer.read().unwrap();
-    println!("{:?}", &data_buffer_content[..].len());
-    for n in 0..65536u32 {
-        assert_eq!(data_buffer_content[n as usize], n * 12);
-    }
+    println!("{:?}", &data_buffer_content[..]);
+    // for n in 0..65536u32 {
+    //     assert_eq!(data_buffer_content[n as usize], n * 12);
+    // }
 }
