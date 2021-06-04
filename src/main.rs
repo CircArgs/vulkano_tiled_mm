@@ -82,58 +82,70 @@ fn main() {
         mod cs {
             vulkano_shaders::shader! {
                 ty: "compute",
+                define: [("TILE_SIZE", "16"),
+                         ("DTYPE", "uint")],
                 src: "
                     #version 450
 
-                    layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+                    layout(local_size_x = TILE_SIZE, local_size_y = TILE_SIZE, local_size_z = 1) in;
 
-                    layout(set = 0, binding = 0) buffer Data0 {
-                        uint data[];
-                    } data0;
+                    layout(set = 0, binding = 0) buffer A {
+                        DTYPE data[];
+                    } a;
 
-                    layout(set = 0, binding = 1) buffer Data1 {
-                        uint data[];
-                    } data1;
+                    layout(set = 0, binding = 1) buffer B {
+                        DTYPE data[];
+                    } b;
 
-                    layout(set = 0, binding = 2) buffer Ret {
-                        uint data[];
-                    } ret;
+                    layout(set = 0, binding = 2) buffer C {
+                        DTYPE data[];
+                    } c;
 
                     layout(push_constant) uniform PushConstantData {
                         uint shared_dim;
                         uint ret_cols;
                         uint ret_rows;
-                        uint tile_width;
-                        uint tile_height;
                       } pc;
-
-                    shared uint ds_A[16][16];
-                    shared uint ds_B[16][16];
+                    // shared memory stores tiles from A and B per group
+                    // threads in the same group will be able to use data other threads have writting to shared memory
+                    // without having to step up caches and potentially missing
+                    // this is the power of the tiling method
+                    // data locality
+                    shared DTYPE tile_A[TILE_SIZE][TILE_SIZE];
+                    shared DTYPE tile_B[TILE_SIZE][TILE_SIZE];
                     
                     void main() {
-                        uint bx = gl_WorkGroupID.x; 
-                        uint by = gl_WorkGroupID.y;
-                        uint tx = gl_LocalInvocationID.x; 
-                        uint ty = gl_LocalInvocationID.y;
 
-                        uint Row = by * gl_WorkGroupSize.y + ty;
-                        uint Col = bx * gl_WorkGroupSize.x + tx;
-                        uint Cvalue = 0;
-                        for (uint t = 0; t < pc.shared_dim/pc.tile_width; ++t) {
-
-                            ds_A[ty][tx] = data0.data[Row*pc.shared_dim + t*pc.tile_width+tx];
-                            ds_B[ty][tx] = data1.data[(t*pc.tile_width+ty)*pc.ret_cols + Col];
+                        uint thread_col = gl_LocalInvocationID.x; 
+                        uint thread_row = gl_LocalInvocationID.y;
+                        uint c_row = gl_GlobalInvocationID.y;
+                        uint c_col = gl_GlobalInvocationID.x;
+                        DTYPE acc = 0;
+                        // tiled along the shared dimension
+                        // we will iterate shared_dim/TILE_SIZE times i.e. the numer of tiles it takes to calculate a tile's worth of elements in C
+                        for (uint t = 0; t < pc.shared_dim/TILE_SIZE; t++) {
+                            // each thread loads one element of shared A and shared B for 2 total memory accesses for each tile we load to calculate a tile of C 
+                            // so 2* pc.shared_dim/TILE_SIZE memory loads per thread
+                            // =====
+                            // 
+                            tile_A[thread_row][thread_col] = a.data[c_row*pc.shared_dim + t*TILE_SIZE+thread_col];
+                            tile_B[thread_row][thread_col] = b.data[(t*TILE_SIZE+thread_row)*pc.ret_cols + c_col];
+                            // we need to make sure the shared memory is up to date but since updating is split amongst threads in the group we need this barrier to synchronize them
+                            // preventing them from moving ahead before their peers have finished
                             barrier();
-                            for (uint i = 0; i < pc.tile_width; ++i){
-                                Cvalue += ds_A[ty][i] * ds_B[i][tx];
-                                barrier();
+                            // each thread accesses the data it needs from the data it and it's peers have collaboratively loaded above
+                            // each performs the 'mini' dot product in this loop which makes up this tile's porting of the overall 'full' dot product of the entire row of A (#c_row) and corresponding entire column of B (#c_col)
+                            for (uint i = 0; i < TILE_SIZE; i++){
+                                acc += tile_A[thread_row][i] * tile_B[i][thread_col];
                             }
-                          
+                            // before we start to make changes to the shared memory again we need to make sure all threads in the group are done using it in this last loop
+                            barrier();
                         }
     
-                        ret.data[Row*pc.ret_cols+Col] = Cvalue;
+                        c.data[c_row*pc.ret_cols+c_col] = acc;
                     }
-                "
+                ",
+
             }
         }
         let shader = cs::Shader::load(device.clone()).unwrap();
@@ -143,8 +155,6 @@ fn main() {
             shared_dim: 64,
             ret_cols: 64,
             ret_rows: 64,
-            tile_width: 16,
-            tile_height: 16,
         };
         (
             Arc::new(
