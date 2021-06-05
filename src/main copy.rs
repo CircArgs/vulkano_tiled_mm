@@ -70,7 +70,8 @@ fn main() {
                 // tile size will determine the thread group size
                 // therefore, tile size * tile_size should be a multiple of 64 (see notes on wavefronts)
                 define: [("TILE_SIZE", "16"),
-                         ("DTYPE", "uint")],
+                         ("DTYPE", "uint"),
+                         ],
                 src: "
                     #version 450
 
@@ -95,11 +96,11 @@ fn main() {
                     // push constants is a uniform struct limited to 128 bytes
                     layout(push_constant) uniform PushConstantData {
                         uint shared_dim;
-                        uint c_cols;
                         uint c_rows;
+                        uint c_cols;
+                        uint c_len;
                         uint a_len;
                         uint b_len;
-
                       } pc;
 
                     // shared memory stores tiles from A and B per group
@@ -122,14 +123,13 @@ fn main() {
 
 
                         
-
-                        // to find the number of tiles we will iterate below, we need to account for different sized matrices. One dimension may require more tiles than others
-                        uint num_tiles = max(max(pc.shared_dim, pc.c_cols), pc.c_rows) - 1;
-                        num_tiles = num_tiles / TILE_SIZE + 1;
-
-                        // we will iterate num_tiles times i.e. the numer of tiles it takes to calculate a tile's worth of elements in C
+                        // we will iterate shared_dim/TILE_SIZE times i.e. the numer of tiles it takes to calculate a tile's worth of elements in C
                         // these tiles form horizontally in A and vertically in B i.e. the same way you picture forming the multiplication from rows of A dotted with columns of B
-                        for (uint tile_number = 0; tile_number < num_tiles; tile_number++) {
+
+                        uint num_tiles = max(max(pc.shared_dim, pc.c_rows), pc.c_cols);
+                        num_tiles = num_tiles/TILE_SIZE ;//+ 1;
+                        
+                        for (uint tile_number = 0; tile_number < num_tiles ; tile_number++) {
 
 
                             // each thread loads one element of shared A and shared B for 2 total memory accesses for each tile we load to calculate a tile of C 
@@ -138,8 +138,7 @@ fn main() {
                             uint a_idx=c_row*pc.shared_dim + // a.data (of course b.data too) is in row major order. the stride of A is pc.shared_dim so this line gets us to the start of row # c_row (picture 2d array moving down A)
                             tile_number*TILE_SIZE + // we are fetching tiled rows from A so this line we are moving #tile_number tiles into A (picture 2d array moving into A from the left to the start of the current tile)
                             thread_col; // move left into the current tile to the value this thread is designated to pull while its peers pull the other values for this tile from A
-                            // if we are out of a's bounds we don't take any new data
-                            a_idx = min(a_idx, pc.a_len);
+
                             uint b_idx = (   
                                 tile_number*TILE_SIZE + // in B, tiles are moving down columns so to get to the appropriate row we look at the tiles first moving #tile_number tiles down putting us as the start of the tile in B (picture 2d array moving down into B)
                                 thread_row // then we move into the tile the appropriate amount based on the position of the current thread (picture 2d array moving down from the top of the tile)
@@ -147,12 +146,18 @@ fn main() {
                             pc.c_cols + // taking into account the stride of b which is pc.c_cols (C derives its number of columns from B)
                             c_col; // finally, we move accross the row to the appropriate spot within the tile corresponding to the value this thread is assigned to load into shared memory
                             
-                            // if we are out of b's bounds we don't take any new data
-                            b_idx = min(b_idx, pc.b_len);
-                            
-                            tile_A[thread_row][thread_col] = a.data[a_idx];
+                            // when the 
+                            // if(a_idx < pc.a_len){
+                                tile_A[thread_row][thread_col] = a.data[a_idx];
+                            // }else{
+                            //     tile_A[thread_row][thread_col] = 0;
+                            // }
 
-                            tile_B[thread_row][thread_col] = b.data[b_idx];
+                            // if(b_idx < pc.b_len){
+                                tile_A[thread_row][thread_col] = b.data[b_idx];
+                            // }else{
+                            //     tile_B[thread_row][thread_col] = 0;
+                            // }
 
 
                             // we need to make sure the shared memory is up to date but since updating is split amongst threads in the group we need this barrier to synchronize them
@@ -166,13 +171,16 @@ fn main() {
                                 acc += tile_A[thread_row][i] * tile_B[i][thread_col];
                             }
 
-
                             // before we start to make changes to the shared memory again we need to make sure all threads in the group are done using it in this last loop
                             barrier();
                         }
-                        if(c_row<pc.c_rows && c_col<pc.c_cols){
-                            c.data[c_row*pc.c_cols+c_col] = acc;
-                        }
+                        uint c_idx = c_row*pc.c_cols+c_col;
+                        // if(c_idx < pc.c_len){
+                            c.data[c_idx] = acc;
+                        // }else{
+                            // c.data[c_idx] = num_tiles;
+                        // }
+                        
                     }
                 ",
 
@@ -185,6 +193,7 @@ fn main() {
             shared_dim: 64,
             c_cols: 64,
             c_rows: 64,
+            c_len: 64 * 64,
             a_len: 64 * 64,
             b_len: 64 * 64,
         };
